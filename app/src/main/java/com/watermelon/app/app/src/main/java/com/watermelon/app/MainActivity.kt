@@ -1,390 +1,227 @@
 package com.watermelon.app
 
-import android.app.DownloadManager
-import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.os.Bundle
-import android.os.Environment
-import android.text.InputType
-import android.view.View
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.TextView
-import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.app.AppCompatActivity
-import androidx.recyclerview.widget.GridLayoutManager
-import androidx.recyclerview.widget.RecyclerView
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.os.Handler
+import android.os.Looper
+import android.view.ViewGroup
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.FrameLayout
+import org.json.JSONArray
 import org.json.JSONObject
 
-class MainActivity : AppCompatActivity() {
+/**
+ * Hidden WebView scraper.
+ * WebView screen ke bahar (invisible) layout me lagta hai, taaki lazy-loaded images chalein.
+ */
+class WebScraper(private val activity: Activity) {
 
-    private lateinit var grid: RecyclerView
-    private lateinit var adapter: CardAdapter
-    private lateinit var banner: TextView
-    private lateinit var status: TextView
-    private lateinit var web: WebScraper
-    private var updateApkUrl: String? = null
+    private val main = Handler(Looper.getMainLooper())
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
+    // Page se cards nikalne ka JavaScript. Result: {t, n, i, c:[{title,link,image}]}
+    private val cardJs = """
+        (function () {
+            function abs(u) {
+                try { return new URL(u, location.href).href; } catch (e) { return ''; }
+            }
+            function imgSrc(img) {
+                if (!img) return '';
+                var s = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') ||
+                        img.getAttribute('data-original') || '';
+                if (!s) {
+                    var ss = img.getAttribute('srcset') || '';
+                    if (ss) s = ss.split(',')[0].trim().split(' ')[0];
+                }
+                if (!s) s = img.currentSrc || img.src || '';
+                return abs(s);
+            }
+            function titleOf(a, img) {
+                var t = a.getAttribute('title') || a.getAttribute('aria-label') ||
+                        (img ? img.getAttribute('alt') : '') || '';
+                if (!t) {
+                    var h = a.querySelector('h1,h2,h3,h4,p,span');
+                    if (h) t = h.innerText || '';
+                }
+                if (!t && a.parentElement) {
+                    var hh = a.parentElement.querySelector('h1,h2,h3,h4');
+                    if (hh) t = hh.innerText || '';
+                }
+                if (!t) t = a.innerText || '';
+                return t.replace(/\s+/g, ' ').trim();
+            }
+            var out = [];
+            var seen = {};
+            var anchors = document.querySelectorAll('a[href]');
+            for (var i = 0; i < anchors.length; i++) {
+                var a = anchors[i];
+                var href = abs(a.getAttribute('href'));
+                if (!href || href.indexOf('http') !== 0 || seen[href]) continue;
+                var p = a.parentElement;
+                var gp = p ? p.parentElement : null;
+                var img = a.querySelector('img') ||
+                          (p ? p.querySelector('img') : null) ||
+                          (gp ? gp.querySelector('img') : null);
+                if (!img) continue;
+                var title = titleOf(a, img);
+                if (title.length < 2) continue;
+                seen[href] = 1;
+                out.push({ title: title.substring(0, 80), link: href, image: imgSrc(img) });
+            }
+            return JSON.stringify({
+                t: document.title,
+                n: anchors.length,
+                i: document.images.length,
+                c: out.slice(0, 60)
+            });
+        })()
+    """.trimIndent()
 
-        web = WebScraper(this)
-        banner = findViewById(R.id.updateBanner)
-        status = findViewById(R.id.statusText)
-        grid = findViewById(R.id.resultsGrid)
-        adapter = CardAdapter { card -> onCardClick(card) }
-        grid.layoutManager = GridLayoutManager(this, 3)
-        grid.adapter = adapter
+    private val scrollJs = "window.scrollTo(0, document.body ? document.body.scrollHeight : 0);"
 
-        findViewById<Button>(R.id.searchBtn).setOnClickListener { runSearch() }
-        findViewById<Button>(R.id.btnSearch).setOnClickListener { runSearch() }
-        findViewById<Button>(R.id.btnSettings).setOnClickListener { showSettings() }
-        findViewById<Button>(R.id.btnLibrary).setOnClickListener { showLibrary() }
-        findViewById<Button>(R.id.btnPlayer).setOnClickListener { askStreamUrl() }
-        findViewById<Button>(R.id.btnDownload).setOnClickListener { askDownloadUrl() }
-        findViewById<Button>(R.id.scraperChip).setOnClickListener { pickScraper() }
-        banner.setOnClickListener { openUpdate() }
+    private val playJs = """
+        (function () {
+            var v = document.querySelector('video');
+            if (v) { try { v.play(); } catch (e) {} }
+            var b = document.querySelector('[class*="play"], [id*="play"]');
+            if (b) { try { b.click(); } catch (e) {} }
+        })()
+    """.trimIndent()
 
-        handleIntent(intent)
-        refreshChip()
-        loadHome()
-        checkUpdate(manual = false)
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun newWebView(): WebView {
+        val wv = WebView(activity)
+        wv.settings.javaScriptEnabled = true
+        wv.settings.domStorageEnabled = true
+        wv.settings.loadsImagesAutomatically = true
+        wv.settings.mediaPlaybackRequiresUserGesture = false
+        wv.settings.userAgentString =
+            "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"
+
+        // Screen ke bahar, lekin layout me: lazy-load ke liye zaroori
+        val host = activity.findViewById<ViewGroup>(android.R.id.content)
+        val lp = FrameLayout.LayoutParams(720, 1280)
+        host.addView(wv, lp)
+        wv.translationX = -10000f
+        return wv
     }
 
-    override fun onNewIntent(intent: Intent?) {
-        super.onNewIntent(intent)
-        handleIntent(intent)
-    }
-
-    private fun handleIntent(intent: Intent?) {
-        val data = intent?.data ?: return
-        if (data.scheme == "wm") addScraperFromLink(data.toString())
-    }
-
-    private fun refreshChip() {
-        val active = ScraperStore.activeScrapers(this)
-        val sel = ScraperStore.selectedName(this)
-        val label = when {
-            active.isEmpty() -> "Scraper: none"
-            active.size == 1 -> "Scraper: ${active[0].name}"
-            else -> "Scraper: ${sel ?: active[0].name} (${active.size} on)"
-        }
-        findViewById<Button>(R.id.scraperChip).text = label
-    }
-
-    // ---------- Home (selected scraper ka homepage) ----------
-
-    private fun loadHome() {
-        val active = ScraperStore.activeScrapers(this)
-        if (active.isEmpty()) {
-            adapter.setItems(emptyList())
-            status.text = "Settings me scraper add karein"
-            return
-        }
-        val selected = ScraperStore.selectedName(this)
-        val target = active.firstOrNull { it.name == selected } ?: active[0]
-        status.text = "Loading ${target.name}..."
-        web.loadCards(target.baseUrl, target.name) { list ->
-            adapter.setItems(list)
-            status.text = if (list.isEmpty()) "${target.name}: content nahi mila" else "${target.name}: ${list.size} items"
+    private fun release(wv: WebView) {
+        try {
+            (wv.parent as? ViewGroup)?.removeView(wv)
+            wv.stopLoading()
+            wv.destroy()
+        } catch (e: Exception) {
+            // ignore
         }
     }
 
-    // ---------- Search (scrapers) ----------
+    /**
+     * Page ke cards load karta hai. Callback main thread par aata hai.
+     * Page scroll karke har 1.5 second check karta hai, jab tak cards na mil jayein (max ~20 second).
+     */
+    fun loadCards(url: String, source: String, onResult: (List<Card>) -> Unit) {
+        main.post {
+            val wv = newWebView()
+            var done = false
+            var started = false
+            var polls = 0
 
-    private fun runSearch() {
-        val query = findViewById<EditText>(R.id.searchInput).text.toString().trim()
-        if (query.isEmpty()) return
-        val active = ScraperStore.activeScrapers(this)
-        if (active.isEmpty()) {
-            Toast.makeText(this, "Settings me scraper add karein", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val selected = ScraperStore.selectedName(this)
-        val targets = if (active.size > 1 && selected != null) {
-            active.filter { it.name == selected }
-        } else {
-            active
-        }
+            fun finish(list: List<Card>) {
+                if (done) return
+                done = true
+                release(wv)
+                onResult(list)
+            }
 
-        val collected = mutableListOf<Card>()
-        var pending = targets.size
-        adapter.setItems(emptyList())
-        status.text = "Searching \"$query\"..."
-
-        for (s in targets) {
-            val url = s.baseUrl.trimEnd('/') + s.searchPath.replace("{q}", Uri.encode(query))
-            web.loadCards(url, s.name) { list ->
-                collected.addAll(list)
-                pending--
-                adapter.setItems(collected.toList())
-                status.text = when {
-                    pending > 0 -> "Searching... ${collected.size} mile"
-                    collected.isEmpty() -> "\"$query\": kuch nahi mila"
-                    else -> "\"$query\": ${collected.size} results"
+            fun poll() {
+                if (done) return
+                polls++
+                wv.evaluateJavascript(scrollJs, null)
+                wv.evaluateJavascript(cardJs) { raw ->
+                    val list = parseCards(raw, source)
+                    if (list.isNotEmpty() || polls >= 12) {
+                        finish(list)
+                    } else {
+                        main.postDelayed({ poll() }, 1500)
+                    }
                 }
             }
-        }
-    }
 
-    // ---------- Card actions ----------
-
-    private fun onCardClick(card: Card) {
-        val options = arrayOf("Play", "Save to library", "Download", "Browser me kholein")
-        AlertDialog.Builder(this)
-            .setTitle(card.title)
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> playPage(card.link)
-                    1 -> pickTagAndSave(card)
-                    2 -> downloadPage(card.link)
-                    3 -> startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(card.link)))
+            wv.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, pageUrl: String?) {
+                    if (!started) {
+                        started = true
+                        main.postDelayed({ poll() }, 1500)
+                    }
                 }
             }
-            .show()
-    }
-
-    /** Page se video link nikal kar player me chalata hai. */
-    private fun playPage(link: String) {
-        Toast.makeText(this, "Video dhoondh raha hoon...", Toast.LENGTH_SHORT).show()
-        web.sniffMedia(link) { url ->
-            if (url == null) {
-                Toast.makeText(this, "Video link nahi mila, browser me kholte hain", Toast.LENGTH_LONG).show()
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link)))
-            } else {
-                openPlayer(url, null)
-            }
+            // Hard timeout
+            main.postDelayed({ finish(emptyList()) }, 40000)
+            wv.loadUrl(url)
         }
     }
 
-    private fun downloadPage(link: String) {
-        Toast.makeText(this, "Video dhoondh raha hoon...", Toast.LENGTH_SHORT).show()
-        web.sniffMedia(link) { url ->
-            if (url == null) {
-                Toast.makeText(this, "Video link nahi mila", Toast.LENGTH_SHORT).show()
-            } else {
-                download(url)
+    /** Page khol kar pehla video/stream link pakadta hai. Callback main thread par aata hai. */
+    fun sniffMedia(pageUrl: String, onResult: (String?) -> Unit) {
+        main.post {
+            val wv = newWebView()
+            var done = false
+
+            fun finish(u: String?) {
+                if (done) return
+                done = true
+                release(wv)
+                onResult(u)
             }
-        }
-    }
 
-    private fun pickTagAndSave(card: Card) {
-        val tags = LibraryStore.TAGS.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("Tag chunein")
-            .setItems(tags) { _, which ->
-                LibraryStore.put(this, LibItem(card.link, card.title, tags[which]))
-                Toast.makeText(this, "Saved: ${tags[which]}", Toast.LENGTH_SHORT).show()
-            }
-            .show()
-    }
+            wv.webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                    val u = request?.url?.toString()
+                    if (u != null && isMedia(u)) {
+                        main.post { finish(u) }
+                    }
+                    return null
+                }
 
-    // ---------- Library ----------
-
-    private fun showLibrary() {
-        val tags = LibraryStore.TAGS.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("Saved / Library")
-            .setItems(tags) { _, which ->
-                val items = LibraryStore.all(this).filter { it.tag == tags[which] }
-                if (items.isEmpty()) {
-                    Toast.makeText(this, "${tags[which]} me kuch nahi hai", Toast.LENGTH_SHORT).show()
-                } else {
-                    AlertDialog.Builder(this)
-                        .setTitle(tags[which])
-                        .setItems(items.map { it.title }.toTypedArray()) { _, idx ->
-                            playPage(items[idx].url)
-                        }
-                        .show()
+                override fun onPageFinished(view: WebView?, u: String?) {
+                    main.postDelayed({ view?.evaluateJavascript(playJs, null) }, 2000)
                 }
             }
-            .show()
-    }
-
-    // ---------- Downloader ----------
-
-    private fun askDownloadUrl() {
-        val input = EditText(this).apply { hint = "Direct video link (mp4/mkv/webm)" }
-        AlertDialog.Builder(this)
-            .setTitle("Download")
-            .setView(input)
-            .setPositiveButton("Download") { _, _ -> download(input.text.toString().trim()) }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun download(url: String) {
-        if (url.isEmpty()) return
-        if (url.contains(".m3u8", ignoreCase = true)) {
-            Toast.makeText(this, "M3U8 (HLS) download abhi supported nahi hai", Toast.LENGTH_LONG).show()
-            return
+            main.postDelayed({ finish(null) }, 30000)
+            wv.loadUrl(pageUrl)
         }
-        val fileName = Uri.parse(url).lastPathSegment ?: "watermelon_video.mp4"
-        val request = DownloadManager.Request(Uri.parse(url))
-            .setTitle(fileName)
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-        val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        dm.enqueue(request)
-        Toast.makeText(this, "Download shuru: $fileName", Toast.LENGTH_SHORT).show()
     }
 
-    // ---------- Player ----------
-
-    private fun openPlayer(url: String, sub: String?) {
-        val i = Intent(this, PlayerActivity::class.java)
-            .putExtra(PlayerActivity.EXTRA_URL, url)
-        if (!sub.isNullOrEmpty()) i.putExtra(PlayerActivity.EXTRA_SUB, sub)
-        startActivity(i)
+    private fun isMedia(u: String): Boolean {
+        val l = u.lowercase()
+        return l.contains(".m3u8") || l.contains(".mp4") || l.contains(".mkv") || l.contains(".webm")
     }
 
-    private fun askStreamUrl() {
-        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val streamInput = EditText(this).apply { hint = "Stream link (m3u8 / mp4)" }
-        val subInput = EditText(this).apply {
-            hint = "Subtitle link (.srt/.vtt, optional)"
-            inputType = InputType.TYPE_CLASS_TEXT
+    private fun parseCards(raw: String?, source: String): List<Card> {
+        if (raw == null || raw == "null") return emptyList()
+        return try {
+            // evaluateJavascript ek JSON string deta hai, pehle unwrap karna padta hai
+            val text = JSONArray("[$raw]").getString(0)
+            val obj = JSONObject(text)
+            val arr = obj.optJSONArray("c") ?: return emptyList()
+            val list = mutableListOf<Card>()
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                list.add(
+                    Card(
+                        o.optString("title"),
+                        o.optString("link"),
+                        o.optString("image"),
+                        source
+                    )
+                )
+            }
+            list
+        } catch (e: Exception) {
+            emptyList()
         }
-        container.addView(streamInput)
-        container.addView(subInput)
-        AlertDialog.Builder(this)
-            .setTitle("M3U8 / Network stream")
-            .setView(container)
-            .setPositiveButton("Play") { _, _ ->
-                val sub = subInput.text.toString().trim()
-                openPlayer(streamInput.text.toString().trim(), if (sub.isEmpty()) null else sub)
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    // ---------- Settings / scrapers ----------
-
-    private fun pickScraper() {
-        val active = ScraperStore.activeScrapers(this)
-        if (active.isEmpty()) {
-            Toast.makeText(this, "Koi active scraper nahi hai", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val names = active.map { it.name }.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("Home scraper")
-            .setItems(names) { _, which ->
-                ScraperStore.setSelected(this, active[which].name)
-                refreshChip()
-                loadHome()
-            }
-            .show()
-    }
-
-    private fun showSettings() {
-        val options = arrayOf("Add scraper (paste Melon link)", "Manage scrapers (on/off, delete)", "Check for update", "About")
-        AlertDialog.Builder(this)
-            .setTitle("Settings")
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> pasteMelonLink()
-                    1 -> manageScrapers()
-                    2 -> checkUpdate(manual = true)
-                    3 -> Toast.makeText(this, "Watermelon v1.1.0", Toast.LENGTH_SHORT).show()
-                }
-            }
-            .show()
-    }
-
-    private fun pasteMelonLink() {
-        val input = EditText(this).apply {
-            hint = "wm://add?cfg=..."
-            inputType = InputType.TYPE_CLASS_TEXT
-        }
-        AlertDialog.Builder(this)
-            .setTitle("Melon Codes link paste karein")
-            .setView(input)
-            .setPositiveButton("Add") { _, _ -> addScraperFromLink(input.text.toString()) }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun addScraperFromLink(link: String) {
-        val s = ScraperStore.parseMelonLink(link)
-        if (s == null) {
-            Toast.makeText(this, "Link galat hai", Toast.LENGTH_SHORT).show()
-            return
-        }
-        ScraperStore.add(this, s)
-        if (ScraperStore.selectedName(this) == null) ScraperStore.setSelected(this, s.name)
-        refreshChip()
-        loadHome()
-        Toast.makeText(this, "Scraper added: ${s.name}", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun manageScrapers() {
-        val list = ScraperStore.all(this)
-        if (list.isEmpty()) {
-            Toast.makeText(this, "Koi scraper nahi", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val names = list.map { (if (it.enabled) "[ON] " else "[OFF] ") + it.name }.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("Scrapers (tap to on/off)")
-            .setItems(names) { _, which ->
-                val s = list[which]
-                s.enabled = !s.enabled
-                ScraperStore.save(this, list)
-                refreshChip()
-                loadHome()
-                manageScrapers()
-            }
-            .setNeutralButton("Delete last") { _, _ ->
-                ScraperStore.remove(this, list.last().name)
-                refreshChip()
-                loadHome()
-            }
-            .setNegativeButton("Close", null)
-            .show()
-    }
-
-    // ---------- Update ----------
-
-    private fun checkUpdate(manual: Boolean) {
-        Thread {
-            val text = Net.get(Net.UPDATE_URL)
-            var newCode = 0
-            var newName = ""
-            var apk = ""
-            if (text != null) {
-                try {
-                    val j = JSONObject(text)
-                    newCode = j.getInt("versionCode")
-                    newName = j.optString("versionName")
-                    apk = j.optString("apkUrl")
-                } catch (e: Exception) {
-                    // bad json, ignore
-                }
-            }
-            val current = packageManager.getPackageInfo(packageName, 0).versionCode
-            runOnUiThread {
-                if (text == null) {
-                    if (manual) Toast.makeText(this, "Update check fail: internet dekhein", Toast.LENGTH_SHORT).show()
-                } else if (newCode > current && apk.isNotEmpty()) {
-                    updateApkUrl = apk
-                    banner.text = "Naya version $newName available. Yahan tap karke update karein"
-                    banner.visibility = View.VISIBLE
-                    if (manual) openUpdate()
-                } else {
-                    banner.visibility = View.GONE
-                    if (manual) Toast.makeText(this, "Aap latest version par hain", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }.start()
-    }
-
-    private fun openUpdate() {
-        val url = updateApkUrl ?: return
-        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
     }
 }
