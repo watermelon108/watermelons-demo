@@ -24,7 +24,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         results = findViewById(R.id.resultsList)
-        adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf())
+        adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, ArrayList<String>())
         results.adapter = adapter
 
         findViewById<Button>(R.id.searchBtn).setOnClickListener { runSearch() }
@@ -75,16 +75,18 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Settings me scraper add karein", Toast.LENGTH_SHORT).show()
             return
         }
-        // If several scrapers are on, search only the selected one; with one scraper, all shown.
         val selected = ScraperStore.selectedName(this)
-        val targets = if (active.size > 1 && selected != null) active.filter { it.name == selected } else active
+        val targets = if (active.size > 1 && selected != null) {
+            active.filter { it.name == selected }
+        } else {
+            active
+        }
 
         resultUrls.clear()
         adapter.clear()
-        targets.forEach { s ->
+        for (s in targets) {
             val url = s.baseUrl.trimEnd('/') + s.searchPath.replace("{q}", Uri.encode(query))
             resultUrls.add(url)
-            // Scraper name shown under each result line, as requested.
             adapter.add("$query\n[${s.name}]")
         }
         adapter.notifyDataSetChanged()
@@ -96,9 +98,10 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Koi active scraper nahi hai", Toast.LENGTH_SHORT).show()
             return
         }
+        val names = active.map { it.name }.toTypedArray()
         AlertDialog.Builder(this)
             .setTitle("Home scraper")
-            .setItems(active.map { it.name }.toTypedArray()) { _, which ->
+            .setItems(names) { _, which ->
                 ScraperStore.setSelected(this, active[which].name)
                 refreshChip()
             }
@@ -151,7 +154,7 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Koi scraper nahi", Toast.LENGTH_SHORT).show()
             return
         }
-        val names = list.map { "${if (it.enabled) "[ON] " else "[OFF] "}${it.name}" }.toTypedArray()
+        val names = list.map { (if (it.enabled) "[ON] " else "[OFF] ") + it.name }.toTypedArray()
         AlertDialog.Builder(this)
             .setTitle("Scrapers (tap to on/off)")
             .setItems(names) { _, which ->
@@ -189,8 +192,10 @@ class MainActivity : AppCompatActivity() {
             .setTitle("M3U8 / Network stream")
             .setView(input)
             .setPositiveButton("Play") { _, _ ->
-                startActivity(Intent(this, PlayerActivity::class.java)
-                    .putExtra(PlayerActivity.EXTRA_URL, input.text.toString().trim()))
+                startActivity(
+                    Intent(this, PlayerActivity::class.java)
+                        .putExtra(PlayerActivity.EXTRA_URL, input.text.toString().trim())
+                )
             }
             .setNegativeButton("Cancel", null)
             .show()
