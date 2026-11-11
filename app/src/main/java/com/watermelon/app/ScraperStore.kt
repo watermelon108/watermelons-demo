@@ -61,4 +61,36 @@ object ScraperStore {
         save(ctx, list)
     }
 
-    fun remove(ctx: C
+    fun remove(ctx: Context, name: String) {
+        val list = all(ctx).filter { it.name != name }
+        save(ctx, list)
+    }
+
+    fun activeScrapers(ctx: Context): List<Scraper> {
+        return all(ctx).filter { it.enabled }
+    }
+
+    fun selectedName(ctx: Context): String? {
+        return ctx.getSharedPreferences(PREF, 0).getString(ACTIVE, null)
+    }
+
+    fun setSelected(ctx: Context, name: String) {
+        ctx.getSharedPreferences(PREF, 0).edit().putString(ACTIVE, name).apply()
+    }
+
+    fun parseMelonLink(link: String): Scraper? {
+        return try {
+            val cfg = Uri.parse(link.trim()).getQueryParameter("cfg") ?: return null
+            val decoded = String(Base64.decode(cfg, Base64.URL_SAFE or Base64.NO_WRAP))
+            val json = JSONObject(decoded)
+            Scraper(
+                json.getString("name"),
+                json.getString("baseUrl"),
+                json.getString("searchPath"),
+                true
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+}
