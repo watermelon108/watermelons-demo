@@ -36,7 +36,7 @@ class MainActivity : AppCompatActivity() {
         banner = findViewById(R.id.updateBanner)
         status = findViewById(R.id.statusText)
         grid = findViewById(R.id.resultsGrid)
-        adapter = CardAdapter { card -> onCardClick(card) }
+        adapter = CardAdapter { card -> openDetail(card.link, card.title, card.image) }
         grid.layoutManager = GridLayoutManager(this, 3)
         grid.adapter = adapter
 
@@ -76,6 +76,20 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.scraperChip).text = label
     }
 
+    /** Cards cache se (30 min) ya web se load karta hai. */
+    private fun cachedCards(url: String, source: String, cb: (List<Card>) -> Unit) {
+        val key = "cards:$url"
+        val hit = Cache.get<List<Card>>(key)
+        if (hit != null) {
+            cb(hit)
+            return
+        }
+        web.loadCards(url, source) { list ->
+            if (list.isNotEmpty()) Cache.put(key, list)
+            cb(list)
+        }
+    }
+
     // ---------- Home ----------
 
     private fun loadHome() {
@@ -88,7 +102,7 @@ class MainActivity : AppCompatActivity() {
         val selected = ScraperStore.selectedName(this)
         val target = active.firstOrNull { it.name == selected } ?: active[0]
         status.text = "Loading ${target.name}..."
-        web.loadCards(target.baseUrl, target.name) { list ->
+        cachedCards(target.baseUrl, target.name) { list ->
             adapter.setItems(list)
             status.text = if (list.isEmpty()) "${target.name}: content nahi mila" else "${target.name}: ${list.size} items"
         }
@@ -118,7 +132,7 @@ class MainActivity : AppCompatActivity() {
 
         for (s in targets) {
             val url = s.baseUrl.trimEnd('/') + s.searchPath.replace("{q}", Uri.encode(query))
-            web.loadCards(url, s.name) { list ->
+            cachedCards(url, s.name) { list ->
                 collected.addAll(list)
                 pending--
                 adapter.setItems(collected.toList())
@@ -131,58 +145,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ---------- Card actions ----------
+    // ---------- Detail / Library ----------
 
-    private fun onCardClick(card: Card) {
-        val options = arrayOf("Play", "Save to library", "Download", "Browser me kholein")
-        AlertDialog.Builder(this)
-            .setTitle(card.title)
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> playPage(card.link)
-                    1 -> pickTagAndSave(card)
-                    2 -> downloadPage(card.link)
-                    3 -> startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(card.link)))
-                }
-            }
-            .show()
+    private fun openDetail(link: String, title: String, image: String) {
+        startActivity(
+            Intent(this, DetailActivity::class.java)
+                .putExtra(DetailActivity.EXTRA_LINK, link)
+                .putExtra(DetailActivity.EXTRA_TITLE, title)
+                .putExtra(DetailActivity.EXTRA_IMAGE, image)
+        )
     }
-
-    private fun playPage(link: String) {
-        Toast.makeText(this, "Video dhoondh raha hoon...", Toast.LENGTH_SHORT).show()
-        web.sniffMedia(link) { url ->
-            if (url == null) {
-                Toast.makeText(this, "Video link nahi mila, browser me kholte hain", Toast.LENGTH_LONG).show()
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link)))
-            } else {
-                openPlayer(url, null)
-            }
-        }
-    }
-
-    private fun downloadPage(link: String) {
-        Toast.makeText(this, "Video dhoondh raha hoon...", Toast.LENGTH_SHORT).show()
-        web.sniffMedia(link) { url ->
-            if (url == null) {
-                Toast.makeText(this, "Video link nahi mila", Toast.LENGTH_SHORT).show()
-            } else {
-                download(url)
-            }
-        }
-    }
-
-    private fun pickTagAndSave(card: Card) {
-        val tags = LibraryStore.TAGS.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("Tag chunein")
-            .setItems(tags) { _, which ->
-                LibraryStore.put(this, LibItem(card.link, card.title, tags[which]))
-                Toast.makeText(this, "Saved: ${tags[which]}", Toast.LENGTH_SHORT).show()
-            }
-            .show()
-    }
-
-    // ---------- Library ----------
 
     private fun showLibrary() {
         val tags = LibraryStore.TAGS.toTypedArray()
@@ -196,7 +168,7 @@ class MainActivity : AppCompatActivity() {
                     AlertDialog.Builder(this)
                         .setTitle(tags[which])
                         .setItems(items.map { it.title }.toTypedArray()) { _, idx ->
-                            playPage(items[idx].url)
+                            openDetail(items[idx].url, items[idx].title, "")
                         }
                         .show()
                 }
@@ -204,19 +176,19 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // ---------- Downloader ----------
+    // ---------- Direct download / stream ----------
 
     private fun askDownloadUrl() {
         val input = EditText(this).apply { hint = "Direct video link (mp4/mkv/webm)" }
         AlertDialog.Builder(this)
             .setTitle("Download")
             .setView(input)
-            .setPositiveButton("Download") { _, _ -> download(input.text.toString().trim()) }
+            .setPositiveButton("Download") { _, _ -> directDownload(input.text.toString().trim()) }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun download(url: String) {
+    private fun directDownload(url: String) {
         if (url.isEmpty()) return
         if (url.contains(".m3u8", ignoreCase = true)) {
             Toast.makeText(this, "M3U8 (HLS) download abhi supported nahi hai", Toast.LENGTH_LONG).show()
@@ -231,8 +203,6 @@ class MainActivity : AppCompatActivity() {
         dm.enqueue(request)
         Toast.makeText(this, "Download shuru: $fileName", Toast.LENGTH_SHORT).show()
     }
-
-    // ---------- Player ----------
 
     private fun openPlayer(url: String, sub: String?) {
         val i = Intent(this, PlayerActivity::class.java)
@@ -261,7 +231,7 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // ---------- Settings / scrapers ----------
+    // ---------- Scrapers / settings ----------
 
     private fun pickScraper() {
         val active = ScraperStore.activeScrapers(this)
@@ -289,7 +259,7 @@ class MainActivity : AppCompatActivity() {
                     0 -> pasteMelonLink()
                     1 -> manageScrapers()
                     2 -> checkUpdate(manual = true)
-                    3 -> Toast.makeText(this, "Watermelon v1.1.0", Toast.LENGTH_SHORT).show()
+                    3 -> Toast.makeText(this, "Watermelon v1.3.0", Toast.LENGTH_SHORT).show()
                 }
             }
             .show()
