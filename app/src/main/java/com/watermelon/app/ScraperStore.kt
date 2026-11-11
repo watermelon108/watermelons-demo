@@ -25,20 +25,31 @@ object ScraperStore {
     fun all(ctx: Context): MutableList<Scraper> {
         val raw = ctx.getSharedPreferences(PREF, 0).getString(KEY, "[]") ?: "[]"
         val arr = JSONArray(raw)
-        return MutableList(arr.length()) { i ->
+        val list = mutableListOf<Scraper>()
+        for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
-            Scraper(o.getString("name"), o.getString("baseUrl"), o.getString("searchPath"), o.getBoolean("enabled"))
+            list.add(
+                Scraper(
+                    o.getString("name"),
+                    o.getString("baseUrl"),
+                    o.getString("searchPath"),
+                    o.getBoolean("enabled")
+                )
+            )
         }
+        return list
     }
 
     fun save(ctx: Context, list: List<Scraper>) {
         val arr = JSONArray()
-        list.forEach {
-            arr.put(JSONObject()
-                .put("name", it.name)
-                .put("baseUrl", it.baseUrl)
-                .put("searchPath", it.searchPath)
-                .put("enabled", it.enabled))
+        for (s in list) {
+            arr.put(
+                JSONObject()
+                    .put("name", s.name)
+                    .put("baseUrl", s.baseUrl)
+                    .put("searchPath", s.searchPath)
+                    .put("enabled", s.enabled)
+            )
         }
         ctx.getSharedPreferences(PREF, 0).edit().putString(KEY, arr.toString()).apply()
     }
@@ -50,25 +61,4 @@ object ScraperStore {
         save(ctx, list)
     }
 
-    fun remove(ctx: Context, name: String) {
-        save(ctx, all(ctx).filter { it.name != name })
-    }
-
-    fun activeScrapers(ctx: Context): List<Scraper> = all(ctx).filter { it.enabled }
-
-    /** Selected scraper for home poster; falls back to first active one. */
-    fun selectedName(ctx: Context): String? =
-        ctx.getSharedPreferences(PREF, 0).getString(ACTIVE, null)
-
-    fun setSelected(ctx: Context, name: String) {
-        ctx.getSharedPreferences(PREF, 0).edit().putString(ACTIVE, name).apply()
-    }
-
-    fun parseMelonLink(link: String): Scraper? = try {
-        val cfg = Uri.parse(link.trim()).getQueryParameter("cfg") ?: return null
-        val json = JSONObject(String(Base64.decode(cfg, Base64.URL_SAFE or Base64.NO_WRAP)))
-        Scraper(json.getString("name"), json.getString("baseUrl"), json.getString("searchPath"), true)
-    } catch (e: Exception) {
-        null
-    }
-}
+    fun remove(ctx: C
