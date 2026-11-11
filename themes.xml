@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <style name="Theme.Watermelon" parent="Theme.AppCompat.DayNight.NoActionBar">
-        <item name="colorPrimary">#2E7D32</item>
-        <item name="colorAccent">#E53935</item>
-    </style>
-</resources>
